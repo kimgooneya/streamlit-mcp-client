@@ -18,4 +18,61 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-app = FastAPI(lifespan=lifespan)
+@asynccontextmanager
+async def lifespan():
+    client = MCPClient()
+    try:
+        connected = await client.connect_to_server(settings.server_script_path)
+        if not connected:
+            raise HTTPException(
+                status_code = 500, detail = "Failed to connect to MCP server"
+            )
+        app.state.client = client
+        yield
+    except Exception as e:
+        print(f"Error during lifespan: {e}")
+        raise e
+    finally:
+        # Shutdown
+        await client.cleanup()
+
+
+app = FastAPI(title="MCP Client API", lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class QueryRequest(BaseModel):
+    query: str
+
+class Message(BaseModel):
+    role: str
+    content: Any
+
+class ToolCall(BaseModel):
+    name: str
+    args: Dict[str, Any]
+
+
+
+@app.post("/query")
+async def process_query(request: QueryRequest):
+    """Proccess aquery and return the response"""
+
+    try:
+        messages = await app.state.client.process_query(request.query)
+        return { "messages": messages }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(app, host="0.0.0.0", port=7000)
