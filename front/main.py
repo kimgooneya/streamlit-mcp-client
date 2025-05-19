@@ -1,27 +1,63 @@
-import asyncio
 import streamlit as st
-from chatbot import Chatbot
+import openai
+from dotenv import load_dotenv
+import os
 
-async def main():
-    if "server_connected" not in st.session_state:
-        st.session_state["server_connected"] = False
+# Load environment variables
+load_dotenv()
 
-    if "tools" not in st.session_state:
-        st.session_state["tools"] = []
+# Configure OpenAI
+openai.api_key = os.getenv("OPEN_AI_API_KEY")
 
-    if "message" not in st.session_state:
-        st.session_state["messages"] = []
+# Set page config
+st.set_page_config(page_title="OpenAI Chat", page_icon="💬")
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat title
+st.title("OpenAI Chat")
+
+# Display chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat input
+if prompt := st.chat_input("What would you like to know?"):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
     
-    API_URL = "http://localhost:9001"
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Get AI response
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+        
+        try:
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ],
+                stream=True
+            )
+            
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    full_response += chunk.choices[0].delta.content
+                    message_placeholder.markdown(full_response + "▌")
+            
+            message_placeholder.markdown(full_response)
+            
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+    
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-    st.set_page_config(page_title="MCP Client", page_icon=":robot_face:")
-
-    st.title("🤖 MCP Client")
-
-    chatbot = Chatbot(API_URL)
-
-    await chatbot.render()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
