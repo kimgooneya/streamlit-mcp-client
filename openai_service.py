@@ -1,5 +1,6 @@
 import openai
-from front.config.settings import get_openai_api_key
+from dotenv import load_dotenv
+import os
 
 class OpenAIService:
     def __init__(self):
@@ -9,7 +10,7 @@ class OpenAIService:
         """
         OpenAI API 키를 업데이트합니다.
         """
-        api_key = get_openai_api_key()
+        api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             openai.api_key = api_key
     
