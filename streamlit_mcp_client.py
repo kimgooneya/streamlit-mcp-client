@@ -3,7 +3,9 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import asyncio
-from mcp_service import MCPService
+from fastmcp import Client
+import json
+from dataclasses import asdict
 
 
 def initialize_session_state():
@@ -16,38 +18,88 @@ def initialize_session_state():
             st.error("OPENAI_API_KEY not found in .env file")
             return
         st.session_state['client'] = OpenAI(api_key=api_key)
-    if 'mcp_service' not in st.session_state:
-        st.session_state['mcp_service'] = MCPService(st.session_state['client'])
+    if 'mcp_server' not in st.session_state:
+        st.session_state['mcp_server'] = Client("http://127.0.0.1:9000/mcp", timeout=30.0)
 
 
-def get_chat_response(messages):
+def tool_to_dict(tool):
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "inputSchema": tool.inputSchema,
+        "annotations": tool.annotations
+    }
+
+
+def safe_json_parse(text):
+    """Safely parse JSON from text that might contain 'json' prefix or other text."""
     try:
-        response = st.session_state['client'].chat.completions.create(
-            model="gpt-4.1-nano",
-            messages=messages,
-            temperature=0.7,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error getting response from OpenAI: {str(e)}")
+        # Remove any 'json' prefix if it exists
+        text = text.strip()
+        if text.lower().startswith('json'):
+            text = text[4:].strip()
+        
+        # Remove any markdown code block markers if they exist
+        text = text.replace('```json', '').replace('```', '').strip()
+        
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        st.error(f"Failed to parse JSON response: {str(e)}")
+        st.write("Raw response:", text)
         return None
 
 
-async def connect_mcp():
+async def get_mcp_response(prompt):
     try:
-        tools = await st.session_state['mcp_service'].connect()
-        return tools
+        async with st.session_state['mcp_server']:
+            # First, get available tools
+            tools = await st.session_state['mcp_server'].list_tools()
+            
+            # Convert tools to JSON-serializable format
+            tools_json = [tool_to_dict(tool) for tool in tools]
+            
+            # Create a prompt for the AI to analyze which tool to use
+            analysis_prompt = f"""Given the user's question: "{prompt}"
+            Available tools with their details:
+            {json.dumps(tools_json, indent=2, ensure_ascii=False)}
+            
+            Please analyze which tool would be most appropriate and what parameters would be needed.
+            Respond in JSON format with:
+            {{
+                "selected_tool": "tool_name",
+                "parameters": {{
+                    "param1": "value1",
+                    "param2": "value2"
+                }},
+                "explanation": "why this tool was selected"
+            }}"""
+            
+            # Get AI's analysis
+            response = st.session_state['client'].chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": analysis_prompt}],
+                temperature=0.7,
+            )
+            
+            response_text = response.choices[0].message.content
+            st.write("AI Response:", response_text)
+            
+            analysis = safe_json_parse(response_text)
+            if not analysis:
+                return None
+            
+            # Execute the selected tool
+            result = await st.session_state['mcp_server'].call_tool(
+                analysis['selected_tool'],
+                analysis['parameters']
+            )
+            
+            return {
+                "analysis": analysis,
+                "result": result
+            }
     except Exception as e:
-        st.error(f"Error connecting to MCP service: {str(e)}")
-        return None
-
-
-async def call_mcp_tool(tool_name, parameters):
-    try:
-        result = await st.session_state['mcp_service'].call_tool(tool_name, parameters)
-        return result
-    except Exception as e:
-        st.error(f"Error calling MCP tool: {str(e)}")
+        st.error(f"Error in MCP communication: {str(e)}")
         return None
 
 
@@ -61,40 +113,6 @@ def main():
     initialize_session_state()
     
     st.title("MCP Client with OpenAI Chat 🤖")
-    
-    # MCP Tools in sidebar
-    with st.sidebar:
-        st.subheader("MCP Tools")
-        
-        # Connect to MCP service
-        if st.button("Connect to MCP Service"):
-            with st.spinner("Connecting to MCP service..."):
-                tools = asyncio.run(connect_mcp())
-                if tools:
-                    st.success("Connected to MCP service!")
-                    st.session_state['available_tools'] = tools
-        
-        # Display available tools
-        if 'available_tools' in st.session_state:
-            st.write("Available Tools:")
-            for tool in st.session_state['available_tools']:
-                with st.expander(f"Tool: {tool.name}"):
-                    st.write(f"Description: {tool.description}")
-                    st.write("Parameters:")
-                    for param_name, param_info in tool.parameters.items():
-                        st.write(f"- {param_name}: {param_info}")
-                    
-                    # Create input fields for parameters
-                    params = {}
-                    for param_name, param_info in tool.parameters.items():
-                        params[param_name] = st.text_input(f"Enter {param_name}", key=f"{tool.name}_{param_name}")
-                    
-                    if st.button(f"Call {tool.name}", key=f"call_{tool.name}"):
-                        with st.spinner(f"Calling {tool.name}..."):
-                            result = asyncio.run(call_mcp_tool(tool_name, params))
-                            if result:
-                                st.success("Tool call successful!")
-                                st.json(result)
     
     # Main chat interface
     st.subheader("Chat Interface")
@@ -110,11 +128,16 @@ def main():
             st.write(prompt)
         
         with st.spinner("Thinking..."):
-            response = get_chat_response(st.session_state['messages'])
+            response = asyncio.run(get_mcp_response(prompt))
             if response:
-                st.session_state['messages'].append({"role": "assistant", "content": response})
+                # Display the analysis
                 with st.chat_message("assistant"):
-                    st.write(response)
+                    st.write("Tool Analysis:")
+                    st.json(response['analysis'])
+                    
+                    st.write("Tool Result:")
+                    st.json(response['result'])
+                
 
 
 if __name__ == "__main__":
